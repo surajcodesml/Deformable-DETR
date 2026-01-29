@@ -12,6 +12,7 @@ import argparse
 import datetime
 import json
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -111,6 +112,59 @@ def get_args_parser():
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
+    # OCT pickle dataset parameters
+    parser.add_argument(
+        '--oct_pkl_root',
+        default='',
+        type=str,
+        help='Root directory containing OCT .pkl files (for dataset_file=oct_pkl)',
+    )
+    parser.add_argument(
+        '--oct_train_list',
+        default='',
+        type=str,
+        help='Text/CSV file listing OCT train volume_ids or .pkl filenames',
+    )
+    parser.add_argument(
+        '--oct_val_list',
+        default='',
+        type=str,
+        help='Text/CSV file listing OCT val volume_ids or .pkl filenames',
+    )
+    parser.add_argument(
+        '--oct_test_list',
+        default='',
+        type=str,
+        help='Optional text/CSV file listing OCT test volume_ids or .pkl filenames',
+    )
+
+    # Detection metric configuration for PR / F1 / confusion matrix
+    parser.add_argument(
+        '--pr_iou_thresh',
+        default=0.5,
+        type=float,
+        help='IoU threshold for precision/recall/F1 and confusion matrix',
+    )
+    parser.add_argument(
+        '--pr_score_thresh',
+        default=0.5,
+        type=float,
+        help='Score threshold for fixed-threshold precision/recall/F1',
+    )
+    parser.add_argument(
+        '--pr_num_thresholds',
+        default=20,
+        type=int,
+        help='Number of score thresholds to scan when computing best-F1',
+    )
+
+    parser.add_argument(
+        '--best_metric_key',
+        default='coco_ap_50',
+        type=str,
+        help='Metric key in eval stats to track the best checkpoint (e.g., coco_ap_50 or pr_macro_f1)',
+    )
+
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
@@ -128,7 +182,8 @@ def get_args_parser():
 
 def main(args):
     utils.init_distributed_mode(args)
-    print("git:\n  {}\n".format(utils.get_sha()))
+    git_info = utils.get_sha()
+    print("git:\n  {}\n".format(git_info))
 
     if args.frozen_weights is not None:
         assert args.masks, "Frozen training is meant for segmentation only"
@@ -141,6 +196,11 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    # Set number of classes for custom datasets
+    if args.dataset_file == "oct_pkl":
+        # 2 foreground classes: fovea, SCR (background handled implicitly)
+        args.num_classes = 2
 
     model, criterion, postprocessors = build_model(args)
     model.to(device)
@@ -225,6 +285,32 @@ def main(args):
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
+
+    # Write hyperparameters and environment info for reproducibility.
+    if args.output_dir and utils.is_main_process():
+        hparams_path = output_dir / "hparams.json"
+        try:
+            env_info = {
+                "python_version": sys.version,
+                "torch_version": torch.__version__,
+                "cuda_version": torch.version.cuda,
+                "cuda_available": torch.cuda.is_available(),
+                "gpu_names": [
+                    torch.cuda.get_device_name(i)
+                    for i in range(torch.cuda.device_count())
+                ] if torch.cuda.is_available() else [],
+                "world_size": utils.get_world_size(),
+            }
+            # utils.get_sha already encodes commit, status, branch in a string
+            hparams = {
+                "git_info": git_info,
+                "env": env_info,
+                "args": vars(args),
+            }
+            with hparams_path.open("w") as f:
+                json.dump(hparams, f, indent=2, sort_keys=True)
+        except Exception as e:
+            print(f"Failed to write hparams.json due to: {e}", file=sys.stderr)
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -257,18 +343,29 @@ def main(args):
         # check the resumed model
         if not args.eval:
             test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args
             )
     
     if args.eval:
-        test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
+        test_stats, coco_evaluator = evaluate(
+            model,
+            criterion,
+            postprocessors,
+            data_loader_val,
+            base_ds,
+            device,
+            args.output_dir,
+            args,
+        )
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
 
     print("Start training")
     start_time = time.time()
+    best_metric = None
+    best_metric_key = args.best_metric_key
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
@@ -290,17 +387,59 @@ def main(args):
                 }, checkpoint_path)
 
         test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args
         )
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+        # Track best checkpoint based on a chosen metric key.
+        current_metric = test_stats.get(best_metric_key, None)
+        if args.output_dir and current_metric is not None:
+            current_metric_value = float(current_metric)
+            if (best_metric is None) or (current_metric_value > best_metric):
+                best_metric = current_metric_value
+                utils.save_on_master(
+                    {
+                        'model': model_without_ddp.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'lr_scheduler': lr_scheduler.state_dict(),
+                        'epoch': epoch,
+                        'args': args,
+                        'best_metric_key': best_metric_key,
+                        'best_metric': best_metric,
+                    },
+                    output_dir / 'checkpoint_best.pth',
+                )
+
+        # Always keep a "last" checkpoint for easy resumption.
+        if args.output_dir:
+            utils.save_on_master(
+                {
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args,
+                    'best_metric_key': best_metric_key,
+                    'best_metric': best_metric,
+                },
+                output_dir / 'checkpoint_last.pth',
+            )
+
+        log_stats = {
+            **{f'train_{k}': v for k, v in train_stats.items()},
+            **{f'test_{k}': v for k, v in test_stats.items()},
+            'epoch': epoch,
+            'n_parameters': n_parameters,
+            'time': datetime.datetime.utcnow().isoformat() + 'Z',
+        }
 
         if args.output_dir and utils.is_main_process():
+            # Legacy log.txt (kept for backward compatibility)
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+            # Structured JSON-lines metrics log
+            with (output_dir / "metrics.jsonl").open("a") as f_jsonl:
+                f_jsonl.write(json.dumps(log_stats) + "\n")
 
             # for evaluation logs
             if coco_evaluator is not None:

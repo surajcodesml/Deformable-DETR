@@ -20,6 +20,8 @@ import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
 from datasets.data_prefetcher import data_prefetcher
+from util import detection_metrics as det_metrics
+from util import box_ops
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -80,7 +82,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir):
+def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, output_dir, args=None):
     model.eval()
     criterion.eval()
 
@@ -99,6 +101,11 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             data_loader.dataset.ann_folder,
             output_dir=os.path.join(output_dir, "panoptic_eval"),
         )
+
+    # For custom PR/F1 metrics (e.g., OCT .pkl), we collect lightweight
+    # per-image detection and ground-truth records.
+    all_detections = []
+    all_ground_truths = []
 
     for samples, targets in metric_logger.log_every(data_loader, 10, header):
         samples = samples.to(device)
@@ -138,6 +145,40 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
             panoptic_evaluator.update(res_pano)
 
+        # Collect detections and ground-truths for custom PR/F1 metrics.
+        # We always work in absolute xyxy pixel coordinates.
+        with torch.no_grad():
+            for tgt, out in zip(targets, results):
+                img_id = tgt["image_id"]
+                # predictions: already in absolute xyxy via postprocessor
+                det_boxes = out["boxes"]
+                det_scores = out["scores"]
+                det_labels = out["labels"]
+
+                # ground truth: boxes stored as normalized cxcywh; convert back
+                gt_boxes_cxcywh = tgt["boxes"]
+                gt_labels = tgt["labels"]
+                size = tgt["size"]
+                h, w = size[0].item(), size[1].item()
+                scale = torch.tensor([w, h, w, h], dtype=torch.float32, device=gt_boxes_cxcywh.device)
+                gt_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(gt_boxes_cxcywh * scale)
+
+                all_detections.append(
+                    {
+                        "image_id": img_id,
+                        "boxes": det_boxes,
+                        "scores": det_scores,
+                        "labels": det_labels,
+                    }
+                )
+                all_ground_truths.append(
+                    {
+                        "image_id": img_id,
+                        "boxes": gt_boxes_xyxy,
+                        "labels": gt_labels,
+                    }
+                )
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -154,13 +195,92 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
     if panoptic_evaluator is not None:
         panoptic_res = panoptic_evaluator.summarize()
     stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-    if coco_evaluator is not None:
-        if 'bbox' in postprocessors.keys():
-            stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
-        if 'segm' in postprocessors.keys():
-            stats['coco_eval_masks'] = coco_evaluator.coco_eval['segm'].stats.tolist()
+
+    # COCO mAP-style metrics broken out into named fields for logging.
+    if coco_evaluator is not None and 'bbox' in postprocessors.keys():
+        bbox_stats = coco_evaluator.coco_eval['bbox'].stats.tolist()
+        # Standard COCO ordering:
+        # [AP, AP50, AP75, APs, APm, APl, AR1, AR10, AR100, ARs, ARm, ARl]
+        if bbox_stats and len(bbox_stats) >= 12:
+            stats['coco_ap'] = float(bbox_stats[0])
+            stats['coco_ap_50'] = float(bbox_stats[1])
+            stats['coco_ap_75'] = float(bbox_stats[2])
+            stats['coco_ap_small'] = float(bbox_stats[3])
+            stats['coco_ap_medium'] = float(bbox_stats[4])
+            stats['coco_ap_large'] = float(bbox_stats[5])
+            stats['coco_ar_1'] = float(bbox_stats[6])
+            stats['coco_ar_10'] = float(bbox_stats[7])
+            stats['coco_ar_100'] = float(bbox_stats[8])
+            stats['coco_ar_small'] = float(bbox_stats[9])
+            stats['coco_ar_medium'] = float(bbox_stats[10])
+            stats['coco_ar_large'] = float(bbox_stats[11])
+        stats['coco_eval_bbox'] = bbox_stats
+
+    if coco_evaluator is not None and 'segm' in postprocessors.keys():
+        stats['coco_eval_masks'] = coco_evaluator.coco_eval['segm'].stats.tolist()
+
     if panoptic_res is not None:
         stats['PQ_all'] = panoptic_res["All"]
         stats['PQ_th'] = panoptic_res["Things"]
         stats['PQ_st'] = panoptic_res["Stuff"]
+
+    # Custom PR/F1 metrics primarily intended for the OCT .pkl dataset.
+    if args is not None and getattr(args, "dataset_file", None) == "oct_pkl":
+        # OCT has 2 foreground classes: 1=fovea, 2=SCR
+        class_names = {1: "fovea", 2: "SCR"}
+        pr_result = det_metrics.compute_pr_f1(
+            detections=all_detections,
+            ground_truths=all_ground_truths,
+            iou_thresh=float(getattr(args, "pr_iou_thresh", 0.5)),
+            score_thresh=float(getattr(args, "pr_score_thresh", 0.5)),
+            num_score_thresholds=int(getattr(args, "pr_num_thresholds", 20)),
+            num_classes=2,
+            class_names=class_names,
+        )
+        per_class = pr_result["per_class"]
+
+        # Flatten per-class fixed and best-F1 metrics into scalar stats.
+        for cls_id, cls_stats in per_class.items():
+            name = cls_stats["name"]
+            fixed = cls_stats["fixed"]
+            best = cls_stats["best"]
+            prefix_fixed = f"pr_fixed_{name}"
+            prefix_best = f"pr_best_{name}"
+            stats[f"{prefix_fixed}_precision"] = float(fixed["precision"])
+            stats[f"{prefix_fixed}_recall"] = float(fixed["recall"])
+            stats[f"{prefix_fixed}_f1"] = float(fixed["f1"])
+            stats[f"{prefix_fixed}_TP"] = float(fixed["TP"])
+            stats[f"{prefix_fixed}_FP"] = float(fixed["FP"])
+            stats[f"{prefix_fixed}_FN"] = float(fixed["FN"])
+
+            stats[f"{prefix_best}_f1"] = float(best["f1"])
+            stats[f"{prefix_best}_precision"] = float(best["precision"])
+            stats[f"{prefix_best}_recall"] = float(best["recall"])
+            stats[f"{prefix_best}_thresh"] = float(best["best_thresh"])
+
+        macro = pr_result["macro"]
+        micro = pr_result["micro"]
+        stats["pr_macro_precision"] = float(macro["precision"])
+        stats["pr_macro_recall"] = float(macro["recall"])
+        stats["pr_macro_f1"] = float(macro["f1"])
+        stats["pr_micro_precision"] = float(micro["precision"])
+        stats["pr_micro_recall"] = float(micro["recall"])
+        stats["pr_micro_f1"] = float(micro["f1"])
+
+        # Confusion-matrix-style summary based on fixed stats.
+        per_class_fixed = {
+            cls_id: det_metrics.PRStats(
+                tp=int(cls_stats["fixed"]["TP"]),
+                fp=int(cls_stats["fixed"]["FP"]),
+                fn=int(cls_stats["fixed"]["FN"]),
+            )
+            for cls_id, cls_stats in per_class.items()
+        }
+        cm = det_metrics.build_confusion_matrix(per_class_fixed, class_names=class_names)
+        # Store compact numeric view under stats.
+        global_cm = cm["global"]
+        stats["cm_global_TP"] = float(global_cm["TP"])
+        stats["cm_global_FP"] = float(global_cm["FP"])
+        stats["cm_global_FN"] = float(global_cm["FN"])
+
     return stats, coco_evaluator
