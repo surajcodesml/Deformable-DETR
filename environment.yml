@@ -1,0 +1,28 @@
+# Conda environment for Deformable-DETR
+# Use this if you prefer a known-good older stack, or if the PyTorch 2.x fixes cause issues.
+#
+# Create:  conda env create -f environment.yml
+# Activate: conda activate deformable_detr
+# Then:    cd models/ops && sh make.sh && python test.py
+
+name: deformable_detr
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.9
+  - pytorch=1.13.1
+  - torchvision=0.14.1
+  - pytorch-cuda=11.7
+  - pip
+  - numpy
+  - scipy
+  - cython
+
+  - pip:
+    - pycocotools
+    - tqdm
