@@ -65,15 +65,13 @@ def _plot_image_with_boxes(
                 bbox=dict(facecolor="black", alpha=0.5, pad=1),
             )
 
-    # Predictions
-    if pred_boxes_xyxy is not None and pred_boxes_xyxy.numel() > 0:
-        keep = torch.ones(pred_boxes_xyxy.shape[0], dtype=torch.bool)
-        if pred_scores is not None:
-            keep = pred_scores >= score_thresh
+    # Predictions (red, score text; only above score_thresh)
+    if pred_boxes_xyxy is not None and pred_boxes_xyxy.numel() > 0 and pred_scores is not None:
+        keep = pred_scores >= score_thresh
         for box, score, label in zip(
             pred_boxes_xyxy[keep],
-            pred_scores[keep] if pred_scores is not None else torch.zeros_like(pred_boxes_xyxy[keep, 0]),
-            pred_labels[keep] if pred_labels is not None else torch.zeros_like(pred_boxes_xyxy[keep, 0]),
+            pred_scores[keep],
+            pred_labels[keep] if pred_labels is not None else torch.full_like(pred_scores[keep], 0, dtype=torch.long),
         ):
             x1, y1, x2, y2 = box.tolist()
             rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, color="red", linewidth=2)
@@ -82,8 +80,8 @@ def _plot_image_with_boxes(
             name = class_names.get(cls_id, str(cls_id)) if class_names else str(cls_id)
             ax.text(
                 x1,
-                y2 + 10,
-                f"Pred: {name} {float(score):.2f}",
+                y2 + 4,
+                f"{name} {float(score):.2f}",
                 fontsize=8,
                 color="red",
                 bbox=dict(facecolor="black", alpha=0.5, pad=1),
@@ -100,10 +98,10 @@ def _plot_image_with_boxes(
 
 def main():
     parser = get_args_parser()
-    parser.add_argument("--vis_num_samples", default=8, type=int)
+    parser.add_argument("--vis_num_samples", default=10, type=int, help="Number of val images to visualize (default 10)")
     parser.add_argument("--vis_seed", default=0, type=int)
-    parser.add_argument("--vis_checkpoint", default="", type=str)
-    parser.add_argument("--vis_score_thresh", default=0.5, type=float)
+    parser.add_argument("--vis_checkpoint", default="", type=str, help="Path to checkpoint .pth (required for predictions)")
+    parser.add_argument("--vis_score_thresh", default=0.3, type=float, help="Score threshold for drawing pred boxes (default 0.3)")
 
     args = parser.parse_args()
 

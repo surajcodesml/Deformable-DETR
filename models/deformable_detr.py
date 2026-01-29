@@ -246,13 +246,16 @@ class SetCriterion(nn.Module):
     @torch.no_grad()
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
         """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
-        This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
+        This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients.
+        For sigmoid logits (no explicit no-object class), count queries where max(sigmoid(logits)) > threshold.
         """
         pred_logits = outputs['pred_logits']
         device = pred_logits.device
         tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)
-        # Count the number of predictions that are NOT "no-object" (which is the last class)
-        card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
+        # Sigmoid: "no object" = all class probs low. Count queries with max(prob) > 0.1 as predicted object.
+        prob = pred_logits.sigmoid()
+        max_prob, _ = prob.max(dim=-1)
+        card_pred = (max_prob > 0.1).sum(1)
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
         losses = {'cardinality_error': card_err}
         return losses

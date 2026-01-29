@@ -7,7 +7,7 @@ This guide walks you through setting up and running training on the OCT `.pkl` d
 1. **OCT pickle files**: Your `.pkl` files should be organized in a directory structure.
    - Each `.pkl` file contains a dict with keys like `image`/`img`, `boxes`/`bboxes`, `labels`.
    - Boxes are normalized `[cx, cy, w, h]` in `[0, 1]`.
-   - Labels are `{0=fovea, 1=SCR, 2=ignore}`.
+   - Labels in `.pkl`: **0 = fovea, 1 = SCR, 2 = no-object (ignore)**. The loader maps 0→1, 1→2 and drops 2, so the model sees **num_classes=2** (fovea=1, SCR=2) with “no-object” implicit (sigmoid, no extra class).
 
 2. **Environment**: Ensure you have:
    - Python 3.7+
@@ -211,23 +211,51 @@ tail -1 outputs/oct_pkl_slurm_*/metrics.jsonl | python -m json.tool
 grep -o '"pr_macro_f1":[0-9.]*' outputs/oct_pkl_slurm_*/metrics.jsonl
 ```
 
-## Step 5: Visualization (Optional)
+## Step 5: Visualization and prediction-count check (on server)
 
-Visualize validation samples with ground truth and predictions:
+### How val images are used
+
+Val images are **not** copied anywhere. The scripts build the same val dataset as training (`build_dataset('val', args)`), so they read from `--oct_pkl_root` and `--oct_val_list`. Use the **same** `--oct_pkl_root`, `--oct_train_list`, and `--oct_val_list` as in your training/Slurm script.
+
+### 1) Visualize 10 val images (GT green, pred > 0.3 red with score)
+
+On the server (after at least one training run has produced a checkpoint):
 
 ```bash
+cd $HOME/Git/Deformable-DETR   # or your repo path
+
 python tools/visualize_oct_samples.py \
   --dataset_file oct_pkl \
-  --oct_pkl_root /path/to/pickle/directory \
-  --oct_train_list /path/to/train_split.txt \
-  --oct_val_list /path/to/val_split.txt \
+  --oct_pkl_root /home/skumar/Git/CSAT/pickle \
+  --oct_train_list $HOME/Git/Deformable-DETR/splits/train_split.txt \
+  --oct_val_list $HOME/Git/Deformable-DETR/splits/val_split.txt \
   --output_dir outputs/oct_pkl_slurm_<JOB_ID> \
   --vis_checkpoint outputs/oct_pkl_slurm_<JOB_ID>/checkpoint_best.pth \
-  --vis_num_samples 8 \
-  --vis_score_thresh 0.5
+  --vis_num_samples 10 \
+  --vis_score_thresh 0.3
 ```
 
-Images will be saved to `output_dir/sanity/`.
+- Replace `<JOB_ID>` with your Slurm job ID (e.g. `outputs/oct_pkl_single_12345`).
+- **GT boxes**: green. **Pred boxes**: red, only if score ≥ 0.3; score text shown next to each pred box.
+- Outputs: `output_dir/sanity/val_idxXXXXX_imgYYYYYY.png`. Download the `sanity/` folder to view locally if needed.
+
+### 2) Check prediction counts (no-object sanity)
+
+Run on 20 val images; reports mean/min/max number of predicted boxes above 0.05, 0.1, 0.3, 0.5. If counts are 100–300 even at 0.3/0.5, no-object handling may be broken.
+
+```bash
+cd $HOME/Git/Deformable-DETR
+
+python tools/check_prediction_counts.py \
+  --dataset_file oct_pkl \
+  --oct_pkl_root /home/skumar/Git/CSAT/pickle \
+  --oct_train_list $HOME/Git/Deformable-DETR/splits/train_split.txt \
+  --oct_val_list $HOME/Git/Deformable-DETR/splits/val_split.txt \
+  --resume outputs/oct_pkl_slurm_<JOB_ID>/checkpoint_best.pth \
+  --num_images 20
+```
+
+Healthy model: low mean at 0.3 and 0.5 (e.g. &lt; 20). GT has typically 0–2 objects per OCT image.
 
 ## Step 6: Evaluation Only
 
@@ -291,9 +319,14 @@ bash tools/run_oct_single_gpu.sh
 sbatch tools/slurm_oct_2gpu.sh
 ```
 
-**Visualize:**
+**Visualize (10 val images, GT green, pred > 0.3 red with score):**
 ```bash
-python tools/visualize_oct_samples.py --vis_checkpoint <CHECKPOINT> ...
+python tools/visualize_oct_samples.py --dataset_file oct_pkl --oct_pkl_root <ROOT> --oct_train_list <TRAIN> --oct_val_list <VAL> --output_dir <OUT> --vis_checkpoint <CHECKPOINT> --vis_num_samples 10 --vis_score_thresh 0.3
+```
+
+**Prediction-count check (20 val images, thresholds 0.05/0.1/0.3/0.5):**
+```bash
+python tools/check_prediction_counts.py --dataset_file oct_pkl --oct_pkl_root <ROOT> --oct_train_list <TRAIN> --oct_val_list <VAL> --resume <CHECKPOINT> --num_images 20
 ```
 
 **Evaluate:**
