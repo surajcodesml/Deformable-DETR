@@ -149,7 +149,9 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
             panoptic_evaluator.update(res_pano)
 
         # Collect detections and ground-truths for custom PR/F1 metrics.
-        # We always work in absolute xyxy pixel coordinates.
+        # Detections are in original image coords (PostProcess used orig_size).
+        # GT boxes are normalized cxcywh relative to transformed "size"; convert to
+        # resized pixels then scale to original so both are in the same space.
         # OCT: dataset/criterion use 0,1; PR metrics expect 1,2 (results already +1 above).
         with torch.no_grad():
             for tgt, out in zip(targets, results):
@@ -160,10 +162,24 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
                 gt_boxes_cxcywh = tgt["boxes"]
                 gt_labels = tgt["labels"]
+                # size = (H, W) of transformed image; orig_size = (H, W) of original image
                 size = tgt["size"]
-                h, w = size[0].item(), size[1].item()
-                scale = torch.tensor([w, h, w, h], dtype=torch.float32, device=gt_boxes_cxcywh.device)
-                gt_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(gt_boxes_cxcywh * scale)
+                orig_size = tgt["orig_size"]
+                size_h, size_w = size[0].item(), size[1].item()
+                orig_h, orig_w = orig_size[0].item(), orig_size[1].item()
+                scale_resized = torch.tensor(
+                    [size_w, size_h, size_w, size_h],
+                    dtype=torch.float32,
+                    device=gt_boxes_cxcywh.device,
+                )
+                gt_boxes_xyxy_resized = box_ops.box_cxcywh_to_xyxy(gt_boxes_cxcywh * scale_resized)
+                # Scale from resized image coords to original image coords
+                scale_to_orig = torch.tensor(
+                    [orig_w / size_w, orig_h / size_h, orig_w / size_w, orig_h / size_h],
+                    dtype=torch.float32,
+                    device=gt_boxes_cxcywh.device,
+                )
+                gt_boxes_xyxy = gt_boxes_xyxy_resized * scale_to_orig
 
                 if args is not None and getattr(args, 'dataset_file', None) == 'oct_pkl':
                     gt_labels = gt_labels + 1

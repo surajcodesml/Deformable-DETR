@@ -32,6 +32,7 @@ python -m torch.distributed.run --nproc_per_node=2 main.py \
   --oct_pkl_root "${OCT_ROOT}" \
   --oct_train_list "${TRAIN_LIST}" \
   --oct_val_list "${VAL_LIST}" \
+  --num_queries 100 \
   --batch_size 2 \
   --num_workers 8 \
   --with_box_refine \

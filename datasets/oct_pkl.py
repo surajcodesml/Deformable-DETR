@@ -73,7 +73,7 @@ def _extract_arrays(sample: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         boxes = boxes.numpy()
     boxes_np = np.asarray(boxes, dtype=np.float32)
 
-    # labels
+    # labels: may be 0-indexed {0, 1} or 1-indexed {1, 2}; we normalize to 0-indexed {0, 1} later
     if "labels" in sample:
         labels = sample["labels"]
     elif "label" in sample:
@@ -86,6 +86,17 @@ def _extract_arrays(sample: dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     labels_np = np.asarray(labels, dtype=np.int64)
 
     return image_np, boxes_np, labels_np
+
+
+def _normalize_labels_to_01(labels: np.ndarray) -> np.ndarray:
+    """Map foreground labels to 0-indexed {0=fovea, 1=SCR}. Accepts {0,1} or {1,2}."""
+    out = np.asarray(labels, dtype=np.int64).copy()
+    if out.size == 0:
+        return out
+    # If values are in {1, 2}, convert to {0, 1}; otherwise assume already {0, 1}
+    if out.min() >= 1 and out.max() <= 2:
+        out = out - 1
+    return out
 
 
 def _to_pil_rgb(image_np: np.ndarray) -> Image.Image:
@@ -331,14 +342,13 @@ def _build_coco_api(files: Sequence[Path], image_ids: Sequence[int]) -> COCO:
             boxes_xyxy = boxes_np.reshape(0, 4)
             labels = labels_np.reshape(0)
         else:
-            # remove zero boxes
             zero_boxes = np.all(boxes_np == 0, axis=1)
             labels = labels_np.copy()
             valid_mask = ~zero_boxes
-            # remove ignore label=2
             valid_mask &= labels != 2
             boxes_np = boxes_np[valid_mask]
             labels = labels[valid_mask]
+            labels = _normalize_labels_to_01(labels)
             boxes_xyxy = _convert_boxes_cxcywh_norm_to_xyxy_abs(boxes_np, h, w)
 
         images.append(
@@ -395,15 +405,15 @@ class OctPKLDataset(Dataset):
     __getitem__ returns:
       - image: PIL.Image in RGB
       - target: dict with COCO-style fields:
-            boxes: Tensor [N,4] absolute xyxy in pixels
+            boxes: Tensor [N,4] absolute xyxy in pixels (before transforms)
             labels: Tensor [N] with values in {0,1} (0=fovea, 1=SCR)
             image_id: Tensor [1]
             area: Tensor [N]
             iscrowd: Tensor [N]
-            orig_size: Tensor [2] [h, w]
-            size: Tensor [2] [h, w]
+            orig_size: Tensor [2] (height, width) of original image; not modified by transforms
+            size: Tensor [2] (height, width); updated by transforms to current image size
 
-    The transforms pipeline will later convert boxes to normalized cxcywh.
+    Transforms convert boxes to normalized cxcywh relative to the transformed image size.
     """
 
     def __init__(
@@ -450,10 +460,10 @@ class OctPKLDataset(Dataset):
             valid_mask &= labels != 2  # drop ignore label
             boxes_np = boxes_np[valid_mask]
             labels = labels[valid_mask]
+            labels = _normalize_labels_to_01(labels)
             boxes_xyxy = _convert_boxes_cxcywh_norm_to_xyxy_abs(boxes_np, h, w)
 
-        # Keep labels as 0 (fovea) and 1 (SCR). SetCriterion expects 0-indexed foreground
-        # (0..num_classes-1) and uses num_classes for no-object; COCO/PR use 1,2 only at eval.
+        # Labels are 0 (fovea) and 1 (SCR). SetCriterion expects 0-indexed; COCO/PR use 1,2 at eval.
         if labels.size == 0:
             labels = np.zeros((0,), dtype=np.int64)
 

@@ -272,6 +272,25 @@ python main.py \
   --output_dir outputs/eval_run
 ```
 
+## Why predictions look wrong early in training
+
+If you see **red boxes in similar/wrong places every image**, **only "fovea" (no SCR)**, and **very low scores (e.g. max 0.02)**:
+
+1. **Same spot every image**  
+   In non–two-stage Deformable DETR, initial reference points come from **query_embed only** (no image). The decoder then refines them using the image. Early in training that refinement is weak, so box positions are almost the same for every image. This is expected; it improves as the decoder learns.
+
+2. **Thin horizontal/vertical strips**  
+   The model outputs (cx, cy, w, h); very small w or h give thin strips. Box regression usually needs many epochs to settle; early on you often get degenerate shapes.
+
+3. **All fovea, no SCR**  
+   The top-100 are taken over 300×2 scores. If class 0 (fovea) logits are higher than class 1 (SCR) everywhere, you only see fovea. With more training, SCR scores can rise. If your dataset has many more fovea than SCR, the model may learn fovea first.
+
+**What to do**
+
+- **Train longer** (e.g. 50+ epochs). Reference-point refinement and box regression need time to become content-dependent and accurate.
+- **Use fewer queries for OCT**: you have 0–2 objects per image, so 300 slots make “no object” hard to learn. Try `--num_queries 100` when launching training (see run scripts below).
+- Optionally **check class balance** (e.g. with a small script over your labels). If SCR is rare, consider a longer run or class-weighted loss in future.
+
 ## Troubleshooting
 
 ### Volume Leakage Error

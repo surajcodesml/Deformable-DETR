@@ -66,14 +66,15 @@ class HungarianMatcher(nn.Module):
             bs, num_queries = outputs["pred_logits"].shape[:2]
 
             # We flatten to compute the cost matrices in a batch
+            # Sigmoid: no no-object class; pred_logits are [B, Q, num_classes].
             out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
-            # Also concat the target labels and boxes
+            # Also concat the target labels and boxes (labels in 0..num_classes-1)
             tgt_ids = torch.cat([v["labels"] for v in targets])
             tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
-            # Compute the classification cost.
+            # Classification cost for sigmoid: per-class probability cost for the target class.
             alpha = 0.25
             gamma = 2.0
             neg_cost_class = (1 - alpha) * (out_prob ** gamma) * (-(1 - out_prob + 1e-8).log())

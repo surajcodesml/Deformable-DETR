@@ -218,8 +218,8 @@ class SetCriterion(nn.Module):
         self.focal_alpha = focal_alpha
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
-        """Classification loss (NLL)
-        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
+        """Classification loss (sigmoid focal). Labels must be 0-indexed in [0, num_classes-1];
+        num_classes is used for no-object. Uses BCE-style one-hot and sigmoid_focal_loss.
         """
         assert 'pred_logits' in outputs
         src_logits = outputs['pred_logits']
@@ -395,22 +395,32 @@ class SetCriterion(nn.Module):
 
 
 class PostProcess(nn.Module):
-    """ This module converts the model's output into the format expected by the coco api"""
+    """Converts the model output into the format expected by the COCO API.
+
+    Model outputs boxes in normalized [0, 1] (cx, cy, w, h) relative to the
+    input image seen by the model. We scale to pixel coordinates using
+    target_sizes. Use sigmoid (not softmax) for class logits.
+    """
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
-        """ Perform the computation
+        """Scale predicted boxes from normalized [0,1] to pixel coordinates.
+
         Parameters:
-            outputs: raw outputs of the model
-            target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
-                          For evaluation, this must be the original image size (before any data augmentation)
-                          For visualization, this should be the image size after data augment, but before padding
+            outputs: raw model outputs (pred_logits, pred_boxes).
+            target_sizes: tensor [batch_size, 2] where each row is (height, width)
+                         in the SAME order as the coordinate system of the
+                         normalized boxes. For evaluation this must be the
+                         ORIGINAL image size (before augmentation) so that
+                         results match COCO GT. For visualization use the
+                         size of the image being displayed (after resize, no padding).
         """
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
 
         assert len(out_logits) == len(target_sizes)
         assert target_sizes.shape[1] == 2
 
+        # Sigmoid: no explicit no-object class; each class is independent.
         prob = out_logits.sigmoid()
         topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
         scores = topk_values
@@ -419,7 +429,7 @@ class PostProcess(nn.Module):
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
         boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
 
-        # and from relative [0, 1] to absolute [0, height] coordinates
+        # Normalized (x1,y1,x2,y2) in [0,1] -> pixel coords. Convention: row 0 = height, row 1 = width.
         img_h, img_w = target_sizes.unbind(1)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
@@ -448,6 +458,8 @@ def build(args):
     num_classes = 20 if args.dataset_file != 'coco' else 91
     if args.dataset_file == "coco_panoptic":
         num_classes = 250
+    if getattr(args, "num_classes", None) is not None:
+        num_classes = args.num_classes
     device = torch.device(args.device)
 
     backbone = build_backbone(args)

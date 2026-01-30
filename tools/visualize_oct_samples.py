@@ -166,7 +166,10 @@ def main():
         if args.vis_checkpoint:
             samples = utils.nested_tensor_from_tensor_list([image.to(device)])
             outputs = model(samples)
-            orig_target_sizes = torch.as_tensor([[image.shape[1], image.shape[2]]], device=device)
+            # PostProcess expects (height, width) per row; image is (C, H, W)
+            orig_target_sizes = torch.as_tensor(
+                [[image.shape[1], image.shape[2]]], device=device, dtype=torch.long
+            )
             results = postprocessors["bbox"](outputs, orig_target_sizes)[0]
             pred_boxes_xyxy = results["boxes"].detach().cpu()
             pred_scores = results["scores"].detach().cpu()
