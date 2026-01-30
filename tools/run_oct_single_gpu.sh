@@ -1,16 +1,32 @@
 #!/bin/bash
+#SBATCH --job-name=oct_detr_1gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+#SBATCH --mem=64G
+#SBATCH --output=logs/oct_detr_1gpu_%j.out
+#SBATCH --error=logs/oct_detr_1gpu_%j.err
+#SBATCH --mail-user=sk1019@nemours.org
+#SBATCH --mail-type=END,FAIL
+
 set -e
 
-CODE_DIR=$(dirname "$0")/..
-CODE_DIR=$(cd "${CODE_DIR}" && pwd)
-
-OCT_ROOT=/path/to/oct_pickles
+CONDA_ENV=deformable
+CODE_DIR=$HOME/Git/Deformable-DETR
+OCT_ROOT=/home/skumar/Git/CSAT/pickle
 TRAIN_LIST=/path/to/oct_train_list.txt
 VAL_LIST=/path/to/oct_val_list.txt
 
-OUT_DIR="${CODE_DIR}/outputs/oct_single_$(date +%Y%m%d_%H%M%S)"
+module load cuda/11.8 || true
+
+source ~/.bashrc
+conda activate "${CONDA_ENV}"
 
 cd "${CODE_DIR}"
+
+OUT_DIR="outputs/oct_pkl_single_${SLURM_JOB_ID}"
 
 python main.py \
   --dataset_file oct_pkl \
@@ -19,7 +35,7 @@ python main.py \
   --oct_val_list "${VAL_LIST}" \
   --num_queries 100 \
   --batch_size 2 \
-  --num_workers 4 \
+  --num_workers 8 \
   --with_box_refine \
   --two_stage \
   --output_dir "${OUT_DIR}"
