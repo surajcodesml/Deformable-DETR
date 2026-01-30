@@ -396,7 +396,7 @@ class OctPKLDataset(Dataset):
       - image: PIL.Image in RGB
       - target: dict with COCO-style fields:
             boxes: Tensor [N,4] absolute xyxy in pixels
-            labels: Tensor [N] with values in {1,2}
+            labels: Tensor [N] with values in {0,1} (0=fovea, 1=SCR)
             image_id: Tensor [1]
             area: Tensor [N]
             iscrowd: Tensor [N]
@@ -452,10 +452,9 @@ class OctPKLDataset(Dataset):
             labels = labels[valid_mask]
             boxes_xyxy = _convert_boxes_cxcywh_norm_to_xyxy_abs(boxes_np, h, w)
 
-        # map labels {0,1} -> {1,2}
-        if labels.size > 0:
-            labels = np.array([int(lbl) + 1 for lbl in labels], dtype=np.int64)
-        else:
+        # Keep labels as 0 (fovea) and 1 (SCR). SetCriterion expects 0-indexed foreground
+        # (0..num_classes-1) and uses num_classes for no-object; COCO/PR use 1,2 only at eval.
+        if labels.size == 0:
             labels = np.zeros((0,), dtype=np.int64)
 
         # build target tensors

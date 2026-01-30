@@ -131,6 +131,9 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
         if 'segm' in postprocessors.keys():
             target_sizes = torch.stack([t["size"] for t in targets], dim=0)
             results = postprocessors['segm'](results, outputs, orig_target_sizes, target_sizes)
+        # OCT .pkl: model outputs class indices 0,1; COCO expects category_id 1,2
+        if args is not None and getattr(args, 'dataset_file', None) == 'oct_pkl':
+            results = [{**r, 'labels': r['labels'] + 1} for r in results]
         res = {target['image_id'].item(): output for target, output in zip(targets, results)}
         if coco_evaluator is not None:
             coco_evaluator.update(res)
@@ -147,15 +150,14 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
 
         # Collect detections and ground-truths for custom PR/F1 metrics.
         # We always work in absolute xyxy pixel coordinates.
+        # OCT: dataset/criterion use 0,1; PR metrics expect 1,2 (results already +1 above).
         with torch.no_grad():
             for tgt, out in zip(targets, results):
                 img_id = tgt["image_id"]
-                # predictions: already in absolute xyxy via postprocessor
                 det_boxes = out["boxes"]
                 det_scores = out["scores"]
                 det_labels = out["labels"]
 
-                # ground truth: boxes stored as normalized cxcywh; convert back
                 gt_boxes_cxcywh = tgt["boxes"]
                 gt_labels = tgt["labels"]
                 size = tgt["size"]
@@ -163,20 +165,13 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, out
                 scale = torch.tensor([w, h, w, h], dtype=torch.float32, device=gt_boxes_cxcywh.device)
                 gt_boxes_xyxy = box_ops.box_cxcywh_to_xyxy(gt_boxes_cxcywh * scale)
 
+                if args is not None and getattr(args, 'dataset_file', None) == 'oct_pkl':
+                    gt_labels = gt_labels + 1
                 all_detections.append(
-                    {
-                        "image_id": img_id,
-                        "boxes": det_boxes,
-                        "scores": det_scores,
-                        "labels": det_labels,
-                    }
+                    {"image_id": img_id, "boxes": det_boxes, "scores": det_scores, "labels": det_labels}
                 )
                 all_ground_truths.append(
-                    {
-                        "image_id": img_id,
-                        "boxes": gt_boxes_xyxy,
-                        "labels": gt_labels,
-                    }
+                    {"image_id": img_id, "boxes": gt_boxes_xyxy, "labels": gt_labels}
                 )
 
     # gather the stats from all processes

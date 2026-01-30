@@ -131,7 +131,7 @@ def main():
     rng.shuffle(indices)
     indices = indices[:num_samples]
 
-    class_names = {1: "fovea", 2: "SCR"}
+    class_names = {0: "fovea", 1: "SCR"}
 
     output_dir = Path(args.output_dir) if args.output_dir else Path(".")
     sanity_dir = output_dir / "sanity"
