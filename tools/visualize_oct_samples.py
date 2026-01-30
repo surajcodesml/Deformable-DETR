@@ -37,6 +37,7 @@ def _plot_image_with_boxes(
     class_names=None,
     title: str = "",
     save_path: Path = None,
+    vis_topk_fallback: int = 10,
 ):
     img_hwc = _denormalize_image(image)
     h, w, _ = img_hwc.shape
@@ -65,13 +66,23 @@ def _plot_image_with_boxes(
                 bbox=dict(facecolor="black", alpha=0.5, pad=1),
             )
 
-    # Predictions (red, score text; only above score_thresh)
+    # Predictions (red, score text). PostProcess returns top-100 by score; filter by score_thresh.
+    # If none above threshold (common early in training), show top vis_topk_fallback so user sees the model is predicting.
     if pred_boxes_xyxy is not None and pred_boxes_xyxy.numel() > 0 and pred_scores is not None:
         keep = pred_scores >= score_thresh
+        n_above = keep.sum().item()
+        used_fallback = False
+        if n_above == 0:
+            k = min(vis_topk_fallback, pred_scores.shape[0])
+            _, top_idx = pred_scores.topk(k, largest=True)
+            keep = torch.zeros_like(keep)
+            keep[top_idx] = True
+            used_fallback = True
+        pred_labels_use = pred_labels if pred_labels is not None else torch.zeros(pred_boxes_xyxy.shape[0], dtype=torch.long)
         for box, score, label in zip(
             pred_boxes_xyxy[keep],
             pred_scores[keep],
-            pred_labels[keep] if pred_labels is not None else torch.full_like(pred_scores[keep], 0, dtype=torch.long),
+            pred_labels_use[keep],
         ):
             x1, y1, x2, y2 = box.tolist()
             rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1, fill=False, color="red", linewidth=2)
@@ -86,6 +97,9 @@ def _plot_image_with_boxes(
                 color="red",
                 bbox=dict(facecolor="black", alpha=0.5, pad=1),
             )
+        if used_fallback:
+            max_s = pred_scores.max().item()
+            ax.set_title(f"{title}  [no pred ≥{score_thresh}; showing top {keep.sum().item()}, max={max_s:.2f}]")
 
     fig.tight_layout()
     if save_path is not None:
@@ -102,6 +116,7 @@ def main():
     parser.add_argument("--vis_seed", default=0, type=int)
     parser.add_argument("--vis_checkpoint", default="", type=str, help="Path to checkpoint .pth (required for predictions)")
     parser.add_argument("--vis_score_thresh", default=0.3, type=float, help="Score threshold for drawing pred boxes (default 0.3)")
+    parser.add_argument("--vis_topk_fallback", default=10, type=int, help="If no pred above thresh, show this many top-score boxes (default 10)")
 
     args = parser.parse_args()
 
@@ -170,6 +185,7 @@ def main():
             class_names=class_names,
             title=title,
             save_path=save_path,
+            vis_topk_fallback=args.vis_topk_fallback,
         )
 
 
